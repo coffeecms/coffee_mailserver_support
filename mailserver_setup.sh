@@ -1,141 +1,243 @@
+#!/bin/bash
 
-# Coffee Mailserver Support - https://blog.lowlevelforest.com/
+# Function to check if postfix and dovecot are installed
+check_installation() {
+    if ! dpkg -l | grep -q postfix; then
+        return 1
+    fi
+    if ! dpkg -l | grep -q dovecot; then
+        return 1
+    fi
+    return 0
+}
 
-This repository provides a Bash script for setting up and managing a mail server using Postfix and Dovecot. It includes features for creating and managing users, domains, and emails.
+# Function to install postfix and dovecot
+install_postfix_dovecot() {
+    apt update
+    apt install -y postfix dovecot-core dovecot-imapd
+    # Basic configuration for postfix and dovecot
+    postconf -e 'myhostname = mail.example.com'
+    postconf -e 'mydomain = example.com'
+    postconf -e 'mydestination = $myhostname, localhost.$mydomain, localhost, $mydomain'
+    systemctl restart postfix
+    systemctl restart dovecot
+}
 
-## Table of Contents
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Usage](#usage)
-- [DNS Configuration](#dns-configuration)
-- [Examples](#examples)
-- [License](#license)
+# Function to optimize postfix and dovecot
+optimize_services() {
+    postconf -e 'default_process_limit = 100'
+    postconf -e 'smtpd_client_connection_count_limit = 100'
+    systemctl restart postfix
+    systemctl restart dovecot
+}
 
-## Prerequisites
+# Function to list domains
+list_domains() {
+    postmap -q "*" /etc/postfix/virtual | cut -d' ' -f1
+}
 
-- A VPS or dedicated server running Ubuntu.
-- Root access to the server.
-- Basic knowledge of Linux command line.
+# Function to add a domain
+add_domain() {
+    read -p "Enter the domain name: " domain
+    echo "$domain" >> /etc/postfix/virtual
+    postmap /etc/postfix/virtual
+    systemctl restart postfix
+}
 
-## Installation
+# Function to remove a domain
+remove_domain() {
+    read -p "Enter the domain name to remove: " domain
+    sed -i "/^$domain/d" /etc/postfix/virtual
+    postmap /etc/postfix/virtual
+    systemctl restart postfix
+}
 
-1. Clone the repository to your server:
-   ```bash
-   git clone https://github.com/coffeecms/coffee_mailserver_support.git
-   cd coffee_mailserver_support
-   ```
+# Function to add a user
+add_user() {
+    domains=$(list_domains)
+    echo "List of domains:"
+    echo "$domains"
+    read -p "Select a domain: " domain
+    read -p "Enter the username: " user
+    password=$(openssl rand -base64 12)
+    echo "$user@$domain $password" >> /etc/postfix/users
+    echo "$user:$password" | chpasswd
+}
 
-2. Make the script executable:
-   ```bash
-   chmod +x mailserver_setup.sh
-   ```
+# Function to create random users
+create_random_users() {
+    domains=$(list_domains)
+    echo "List of domains:"
+    
+    if [[ -z "$domains" ]]; then
+        echo "No domains available. Please add a domain first."
+        return
+    fi
+    
+    read -p "Select a domain: " domain
+    read -p "Enter the number of random emails to create: " count
+    output_file="/etc/emails_account_$(date +%d_%m_%Y).txt"
+    
+    for i in $(seq 1 $count); do
+        firstname=$(shuf -n 1 /usr/share/dict/words)
+        lastname=$(shuf -n 1 /usr/share/dict/words)
+        random_char=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 1)
+        user="${firstname}.${lastname}${random_char}"
+        password=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 8)
+        
+        # Add user to postfix
+        echo "$user@$domain" >> /etc/postfix/virtual
+        echo "$user:$password" | chpasswd
+        
+        # Write information to file
+        echo "$user@$domain $password" >> "$output_file"
+    done
+    
+    # Update postfix configuration
+    postmap /etc/postfix/virtual
+    systemctl restart postfix
+    
+    echo "User list has been saved to $output_file"
+}
 
-3. Run the script:
-   ```bash
-   sudo ./mailserver_setup.sh
-   ```
+# Function to read emails of a user
+read_email_of_user() {
+    read -p "Enter user (e.g., user@example.com): " user
+    read -sp "Enter password: " password
+    echo
+    
+    # Authenticate user (assumes Dovecot is configured to support this)
+    if dovecot-authenticate "$user" "$password"; then
+        # Fetch email
+        emails=$(fetchmail --user "$user" --password "$password" --mda "/usr/bin/procmail" 2>&1)
+        
+        # Display the top 5 newest emails
+        echo "Top 5 newest emails for $user:"
+        echo "$emails" | head -n 5
+    else
+        echo "Invalid login credentials."
+    fi
+}
 
-## Usage
+# Function to delete all emails of a user
+delete_user_emails() {
+    read -p "Enter user (e.g., user@example.com) to delete all emails: " user
+    
+    # Check if user exists
+    if grep -q "$user" /etc/postfix/virtual; then
+        # Command to delete emails (assumes maildir format)
+        rm -rf /var/mail/$user/*
+        echo "All emails for $user have been deleted."
+    else
+        echo "User does not exist."
+    fi
+}
 
-### Main Menu Options
+# Function to delete all emails
+delete_all_emails() {
+    read -p "Are you sure you want to delete all emails? (y/n): " confirmation
+    if [[ "$confirmation" == "y" ]]; then
+        rm -rf /var/mail/*/*
+        echo "All emails have been deleted."
+    else
+        echo "Operation canceled."
+    fi
+}
 
-After running the script, you'll see a menu with the following options:
+# Function to delete emails older than n days
+delete_emails_older_than_n_days() {
+    read -p "Enter the number of days: " days
+    find /var/mail/* -type f -mtime +$days -exec rm {} \;
+    echo "Emails older than $days days have been deleted."
+}
 
-1. **Install Postfix & Dovecot**: Installs and configures the mail server.
-2. **Optimize Postfix & Dovecot**: Adjusts settings based on server specifications.
-3. **List Domains**: Displays the currently configured domains.
-4. **Add Domain**: Adds a new domain to the mail server.
-5. **Remove Domain**: Removes an existing domain from the mail server.
-6. **Add User**: Creates a new email user.
-7. **Create Random Users**: Generates random email users.
-8. **Read Email of User**: Allows users to read their emails.
-9. **Delete All Emails of a User**: Removes all emails for a specified user.
-10. **Delete All Emails**: Permanently deletes all emails from the server.
-11. **Delete Emails Older Than n Days**: Deletes emails older than a specified number of days.
-12. **Delete Users from File**: Removes users listed in a specified file.
-13. **Create Users from File**: Creates users with passwords from a specified file.
-14. **Exit**: Closes the script.
+# Function to delete users listed in a file
+delete_users_from_file() {
+    while IFS= read -r user; do
+        # Remove user
+        userdel "$user"
+        echo "Deleted user: $user"
+    done < /etc/users_delete.txt
+}
 
-### Example Commands
+# Function to create users from a file
+create_users_from_file() {
+    while IFS= read -r line; do
+        IFS=' ' read -r user password <<< "$line"
+        echo "$user:$password" | chpasswd
+        echo "$user has been created."
+    done < /etc/users_add.txt
+}
 
-- To add a domain:
-  ```bash
-  Enter the domain name: example.com
-  ```
+# Main menu
+while true; do
+    clear
+    echo "1. Install postfix & dovecot"
+    echo "2. Optimize postfix & dovecot"
+    echo "3. List domains"
+    echo "4. Add domain"
+    echo "5. Remove domain"
+    echo "6. Add user"
+    echo "7. Create random users"
+    echo "8. Read email of user"
+    echo "9. Delete all emails of a user"
+    echo "10. Delete all emails"
+    echo "11. Delete emails older than n days"
+    echo "12. Delete users from file"
+    echo "13. Create users from file"
+    echo "14. Exit"
+    read -p "Select an option: " choice
 
-- To create a user:
-  ```bash
-  Select a domain: example.com
-  Enter the username: user1
-  ```
-
-- To read emails for a user:
-  ```bash
-  Enter user (e.g., user@example.com): user1@example.com
-  Enter password: ********
-  ```
-
-## DNS Configuration
-
-To ensure your mail server operates correctly, you need to configure DNS records for your domain. Follow these steps:
-
-1. **A Record**: Point your domain to your server's IP address.
-   ```
-   Type: A
-   Host: @
-   Value: <your-server-ip>
-   TTL: 3600
-   ```
-
-2. **MX Record**: Set the mail exchange record for your domain.
-   ```
-   Type: MX
-   Host: @
-   Value: mail.example.com
-   Priority: 10
-   TTL: 3600
-   ```
-
-3. **SPF Record**: Add an SPF record to authorize your server to send emails.
-   ```
-   Type: TXT
-   Host: @
-   Value: "v=spf1 a mx ip4:<your-server-ip> -all"
-   TTL: 3600
-   ```
-
-4. **DKIM Record**: If you have DKIM enabled, add the DKIM public key as a TXT record.
-   ```
-   Type: TXT
-   Host: default._domainkey
-   Value: "v=DKIM1; k=rsa; p=<your-dkim-public-key>"
-   TTL: 3600
-   ```
-
-5. **DMARC Record**: Optionally, set up DMARC to control email authentication.
-   ```
-   Type: TXT
-   Host: _dmarc
-   Value: "v=DMARC1; p=none; rua=mailto:postmaster@example.com"
-   TTL: 3600
-   ```
-
-## Examples
-
-### Adding a Domain
-After installation, you can add your domain by selecting the option in the menu and entering your domain name.
-
-### Creating a User
-Select the domain you want to create a user for and provide a username. The script will generate a random password for you.
-
-### Deleting Emails
-To delete emails for a user, select the appropriate option, enter the username, and confirm the action.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-
-### Notes
-- Replace `<your-server-ip>` and `<your-dkim-public-key>` with the actual values for your mail server.
-- Ensure that the instructions match the actual behavior of your script, and feel free to customize any sections as needed.
+    case $choice in
+        1)
+            if check_installation; then
+                echo "Postfix and Dovecot are already installed."
+            else
+                install_postfix_dovecot
+            fi
+            ;;
+        2)
+            optimize_services
+            ;;
+        3)
+            list_domains
+            read -p "Press Enter to continue..."
+            ;;
+        4)
+            add_domain
+            ;;
+        5)
+            remove_domain
+            ;;
+        6)
+            add_user
+            ;;
+        7)
+            create_random_users
+            ;;
+        8)
+            read_email_of_user
+            ;;
+        9)
+            delete_user_emails
+            ;;
+        10)
+            delete_all_emails
+            ;;
+        11)
+            delete_emails_older_than_n_days
+            ;;
+        12)
+            delete_users_from_file
+            ;;
+        13)
+            create_users_from_file
+            ;;
+        14)
+            exit 0
+            ;;
+        *)
+            echo "Invalid choice!"
+            ;;
+    esac
+done
